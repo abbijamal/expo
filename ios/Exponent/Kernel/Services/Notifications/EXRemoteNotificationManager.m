@@ -49,7 +49,7 @@ typedef void(^EXRemoteNotificationAPNSTokenHandler)(NSData * _Nullable apnsToken
 
 - (void)registerForRemoteNotifications
 {
-  if (![self _supportsCurrentRuntimeEnvironment]) {
+  if (![self supportsCurrentRuntimeEnvironment]) {
     // don't register, because the detached app may not be built with APNS entitlements,
     // and in that case this method would actually be bad to call. (not just a no-op.)
     DDLogWarn(@"Expo Remote Notification services won't work in an ExpoKit app because Expo cannot manage your APNS certificates.");
@@ -82,23 +82,6 @@ typedef void(^EXRemoteNotificationAPNSTokenHandler)(NSData * _Nullable apnsToken
   [self _synchronizeCurrentAPNSToken:token];
 }
 
-- (void)handleRemoteNotification:(nullable NSDictionary *)notification fromBackground:(BOOL)isFromBackground
-{
-  if (![self _supportsCurrentRuntimeEnvironment]) {
-    DDLogWarn(@"Expo Remote Notification services won't work in an ExpoKit app because Expo cannot manage your APNS certificates.");
-  }
-  if (notification) {
-    NSDictionary *body = notification[@"body"] ?: @{};
-    NSString *experienceId = notification[@"experienceId"];
-    if (experienceId) {
-      [[EXKernel sharedInstance] sendNotification:body
-                               toExperienceWithId:experienceId
-                                   fromBackground:isFromBackground
-                                         isRemote:YES];
-    }
-  }
-}
-
 #pragma mark - scoped module delegate
 
 - (NSString *)apnsTokenStringForScopedModule:(__unused id)scopedModule
@@ -115,54 +98,57 @@ typedef void(^EXRemoteNotificationAPNSTokenHandler)(NSData * _Nullable apnsToken
 {
   __weak id weakScopedModule = scopedModule;
   dispatch_async(_queue, ^{
-    if (![self _canRegisterForRemoteNotifications]) {
-      NSError *error = [NSError errorWithDomain:kEXRemoteNotificationErrorDomain
-                                           code:EXRemoteNotificationErrorCodePermissionNotGranted
-                                       userInfo:@{
-                                                  NSLocalizedDescriptionKey: @"This app does not have permission to show notifications",
-                                                  }];
-      handler(nil, error);
-      return;
-    }
     
-    if (self->_currentAPNSToken) {
-      NSString *experienceId = ((EXScopedBridgeModule *)scopedModule).experienceId;
-      [[EXApiV2Client sharedClient] getExpoPushTokenForExperience:experienceId
-                                                      deviceToken:self->_currentAPNSToken
-                                                completionHandler:handler];
-      return;
-    }
-    
-    // When we receive the APNS token, register it with our server and receive an Expo push token
-    [self->_apnsTokenHandlers addObject:^(NSData * _Nullable apnsToken, NSError * _Nullable registrationError) {
-      __strong id strongScopedModule = weakScopedModule;
-      if (!strongScopedModule) {
-        NSError *error = [NSError errorWithDomain:kEXKernelErrorDomain
-                                             code:EXKernelErrorCodeModuleDeallocated
-                                         userInfo:@{
-                                                    NSLocalizedDescriptionKey: @"The scoped module that requested an Expo push token was deallocated",
-                                                    }];
-        handler(nil, error);
-        return;
-      }
+    [self _canRegisterForRemoteNotificationsWithHandler:^(BOOL can) {
+        if (!can) {
+          NSError *error = [NSError errorWithDomain:kEXRemoteNotificationErrorDomain
+                                               code:EXRemoteNotificationErrorCodePermissionNotGranted
+                                           userInfo:@{
+                                                      NSLocalizedDescriptionKey: @"This app does not have permission to show notifications",
+                                                      }];
+          handler(nil, error);
+          return;
+        }
       
-      if (apnsToken) {
-        NSString *experienceId = ((EXScopedBridgeModule *)scopedModule).experienceId;
-        [[EXApiV2Client sharedClient] getExpoPushTokenForExperience:experienceId
-                                                        deviceToken:apnsToken
-                                                  completionHandler:handler];
-      } else {
-        NSError *error = [NSError errorWithDomain:kEXRemoteNotificationErrorDomain
-                                             code:EXRemoteNotificationErrorCodeAPNSRegistrationFailed
-                                         userInfo:@{
-                                                    NSLocalizedDescriptionKey: @"The device was unable to register for remote notifications with Apple",
-                                                    NSUnderlyingErrorKey: registrationError,
-                                                    }];
-        handler(nil, error);
-      }
+        if (self->_currentAPNSToken) {
+          NSString *experienceId = ((EXScopedBridgeModule *)scopedModule).experienceId;
+          [[EXApiV2Client sharedClient] getExpoPushTokenForExperience:experienceId
+                                                          deviceToken:self->_currentAPNSToken
+                                                    completionHandler:handler];
+          return;
+        }
+      
+        // When we receive the APNS token, register it with our server and receive an Expo push token
+        [self->_apnsTokenHandlers addObject:^(NSData * _Nullable apnsToken, NSError * _Nullable registrationError) {
+          __strong id strongScopedModule = weakScopedModule;
+          if (!strongScopedModule) {
+            NSError *error = [NSError errorWithDomain:kEXKernelErrorDomain
+                                                 code:EXKernelErrorCodeModuleDeallocated
+                                             userInfo:@{
+                                                        NSLocalizedDescriptionKey: @"The scoped module that requested an Expo push token was deallocated",
+                                                        }];
+            handler(nil, error);
+            return;
+          }
+          
+          if (apnsToken) {
+            NSString *experienceId = ((EXScopedBridgeModule *)scopedModule).experienceId;
+            [[EXApiV2Client sharedClient] getExpoPushTokenForExperience:experienceId
+                                                            deviceToken:apnsToken
+                                                      completionHandler:handler];
+          } else {
+            NSError *error = [NSError errorWithDomain:kEXRemoteNotificationErrorDomain
+                                                 code:EXRemoteNotificationErrorCodeAPNSRegistrationFailed
+                                             userInfo:@{
+                                                        NSLocalizedDescriptionKey: @"The device was unable to register for remote notifications with Apple",
+                                                        NSUnderlyingErrorKey: registrationError,
+                                                        }];
+            handler(nil, error);
+          }
+        }];
+      
+        [self registerForRemoteNotifications];
     }];
-    
-    [self registerForRemoteNotifications];
   });
 }
 
@@ -208,7 +194,7 @@ typedef void(^EXRemoteNotificationAPNSTokenHandler)(NSData * _Nullable apnsToken
   }];
 }
 
-- (BOOL)_canRegisterForRemoteNotifications
+- (void)_canRegisterForRemoteNotificationsWithHandler:(void (^)(BOOL can))handler
 {
   dispatch_assert_queue(_queue);
   
@@ -218,11 +204,16 @@ typedef void(^EXRemoteNotificationAPNSTokenHandler)(NSData * _Nullable apnsToken
   // TODO: Switch this to use UNNotificationSettings for iOS 10+. Note that UNNotificationCenter
   // is not thread-safe but can run off of the main thread (ex: a serial queue for notifications).
   dispatch_assert_queue(dispatch_get_main_queue());
-  UIUserNotificationSettings * settings = RCTSharedApplication().currentUserNotificationSettings;
-  return settings.types != UIUserNotificationTypeNone;
+  [[UNUserNotificationCenter currentNotificationCenter] getNotificationSettingsWithCompletionHandler:^(UNNotificationSettings * _Nonnull settings) {
+    if (settings.alertSetting == UNNotificationSettingEnabled) {
+      handler(YES);
+      return;
+    }
+    handler(NO);
+  }];
 }
 
-- (BOOL)_supportsCurrentRuntimeEnvironment
+- (BOOL)supportsCurrentRuntimeEnvironment
 {
   if (![EXEnvironment sharedEnvironment].isDetached) {
     return YES;
